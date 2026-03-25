@@ -10,6 +10,7 @@ export async function POST(req: Request) {
     }
 
     let playlistId = channelUrl;
+    let channelId = null;
 
     // If it's a handle or custom URL, we need to fetch the page to find the actual Channel ID
     if (channelUrl.includes('@') || channelUrl.includes('/c/') || channelUrl.includes('/user/')) {
@@ -30,7 +31,6 @@ export async function POST(req: Request) {
           /"channelId":"(UC[^"]+)"/
         ];
         
-        let channelId = null;
         for (const pattern of patterns) {
           const match = html.match(pattern);
           if (match && match[1]) {
@@ -40,11 +40,9 @@ export async function POST(req: Request) {
         }
 
         if (channelId) {
-          // Convert Channel ID (UC...) to Uploads Playlist ID (UU...)
           playlistId = channelId.replace(/^UC/, 'UU');
         } else {
           try {
-            // Fallback to ytpl's own resolution if regex fails
             playlistId = await ytpl.getPlaylistID(channelUrl);
           } catch (ytplErr) {
             return NextResponse.json({ error: 'Could not resolve channel ID from URL. Make sure the URL is correct.' }, { status: 400 });
@@ -56,13 +54,52 @@ export async function POST(req: Request) {
     } else if (channelUrl.includes('/channel/UC')) {
       const match = channelUrl.match(/channel\/(UC[^/?]+)/);
       if (match && match[1]) {
+        channelId = match[1];
         playlistId = match[1].replace(/^UC/, 'UU');
       }
     }
 
-    // Fetch the playlist items (Uploads playlist contains all channel videos)
-    // We limit to Infinity to get all videos, but ytpl batches them.
-    // Note: For massive channels, this might take a few seconds.
+    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+
+    // Strategy 1: YouTube Data API (Preferred)
+    if (YOUTUBE_API_KEY && playlistId) {
+      try {
+        console.log(`[YouTube API] Fetching playlist ${playlistId}`);
+        let videos: any[] = [];
+        let nextPageToken = '';
+        let channelTitle = 'Canal';
+
+        do {
+          const res = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId=${playlistId}&key=${YOUTUBE_API_KEY}${nextPageToken ? `&pageToken=${nextPageToken}` : ''}`);
+          const data = await res.json();
+
+          if (!res.ok) {
+            throw new Error(data.error?.message || 'YouTube API error');
+          }
+
+          if (data.items && data.items.length > 0) {
+            channelTitle = data.items[0].snippet.channelTitle;
+            const pageVideos = data.items.map((item: any) => ({
+              title: item.snippet.title,
+              url: `https://www.youtube.com/watch?v=${item.snippet.resourceId.videoId}`,
+              id: item.snippet.resourceId.videoId
+            }));
+            videos = [...videos, ...pageVideos];
+          }
+
+          nextPageToken = data.nextPageToken;
+        } while (nextPageToken);
+
+        if (videos.length > 0) {
+          return NextResponse.json({ channelTitle, videos });
+        }
+      } catch (apiError: any) {
+        console.warn('[YouTube API] Failed, falling back to ytpl:', apiError.message);
+      }
+    }
+
+    // Strategy 2: Fallback to ytpl (Scraping)
+    console.log(`[ytpl Fallback] Fetching playlist ${playlistId}`);
     const playlist = await ytpl(playlistId, { 
       limit: Infinity,
       requestOptions: {

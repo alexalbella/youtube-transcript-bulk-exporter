@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { YoutubeTranscript } from 'youtube-transcript';
 import { GoogleGenAI } from '@google/genai';
+import youtubedl from 'youtube-dl-exec';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
 
 // Helper to extract video ID
 function extractVideoId(url: string) {
@@ -26,103 +30,97 @@ function parseVtt(vtt: string) {
     .trim();
 }
 
-// AI Fallback function
+// AI Fallback function using youtube-dl-exec and Gemini Files API
 async function transcribeWithAI(videoUrl: string): Promise<string> {
   console.log(`[AI Fallback] Starting AI transcription for ${videoUrl}`);
   
-  // 1. Get audio URL from Cobalt (v2 API)
-  const cobaltRes = await fetch('https://api.cobalt.tools/', {  // ✅ FIX 1: new endpoint
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Origin': 'https://cobalt.tools',
-      'Referer': 'https://cobalt.tools/'
-    },
-    body: JSON.stringify({
-      url: videoUrl,
-      downloadMode: 'audio',  // ✅ FIX 1: was isAudioOnly: true
-      audioFormat: 'opus'      // ✅ FIX 1: was aFormat: 'opus'
-    })
-  });
+  const videoId = extractVideoId(videoUrl) || 'audio';
+  const tmpFilePath = path.join(os.tmpdir(), `${videoId}.mp3`);
 
-  if (!cobaltRes.ok) {
-    throw new Error('No se pudo obtener el audio del video para la IA.');
-  }
+  try {
+    console.log(`[AI Fallback] Downloading audio using youtube-dl-exec to ${tmpFilePath}...`);
+    
+    await youtubedl(videoUrl, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      output: tmpFilePath,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      addHeader: [
+        'referer:youtube.com',
+        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      ]
+    });
 
-  const cobaltData = await cobaltRes.json();
-  const audioUrl = cobaltData.url ?? cobaltData.tunnel;  // ✅ FIX 1: v2 response shape
+    const stats = await fs.stat(tmpFilePath);
+    console.log(`[AI Fallback] Audio downloaded, size: ${(stats.size / 1024 / 1024).toFixed(2)} MB. Uploading to Gemini Files API...`);
 
-  if (!audioUrl) {
-    throw new Error('La API de audio no devolvió una URL válida.');
-  }
+    // We must use NEXT_PUBLIC_GEMINI_API_KEY as per the environment constraints
+    const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;  
+    if (!apiKey) {
+      throw new Error('API Key de Gemini no configurada.');
+    }
 
-  console.log(`[AI Fallback] Downloading audio from ${audioUrl.substring(0, 50)}...`);
+    const ai = new GoogleGenAI({ apiKey });
 
-  // 2. Fetch the audio file
-  const audioRes = await fetch(audioUrl);
-  if (!audioRes.ok) {
-    throw new Error('Falló la descarga del archivo de audio.');
-  }
-
-  // Check size (Gemini inline limit is ~20MB)
-  const contentLength = audioRes.headers.get('content-length');
-  const MAX_SIZE = 19 * 1024 * 1024; // 19MB to be safe
-  if (contentLength && parseInt(contentLength) > MAX_SIZE) {
-    throw new Error('El video es demasiado largo para la transcripción por IA (límite de ~40 minutos).');
-  }
-
-  // ✅ FIX 3: detect MIME type dynamically
-  const contentType = audioRes.headers.get('content-type') ?? 'audio/ogg';
-  const mimeType = contentType.split(';')[0];
-
-  const arrayBuffer = await audioRes.arrayBuffer();
-  
-  if (arrayBuffer.byteLength > MAX_SIZE) {
-    throw new Error('El video es demasiado largo para la transcripción por IA (límite de ~40 minutos).');
-  }
-
-  const base64Audio = Buffer.from(arrayBuffer).toString('base64');
-  console.log(`[AI Fallback] Audio downloaded, size: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB, type: ${mimeType}. Sending to Gemini...`);
-
-  // 3. Send to Gemini
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY || process.env.GEMINI_API_KEY;  
-  if (!apiKey) {
-    throw new Error('API Key de Gemini no configurada.');
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: 'Transcribe el siguiente audio con la mayor precisión posible en el idioma original en el que se habla. Devuelve ÚNICAMENTE el texto de la transcripción, sin ningún otro comentario, formato markdown o introducción.' },
-          {
-            inlineData: {
-              mimeType,  // ✅ FIX 3: dynamic instead of hardcoded 'audio/ogg'
-              data: base64Audio
-            }
-          }
-        ]
+    // Upload to Gemini Files API
+    const uploadResult = await ai.files.upload({
+      file: tmpFilePath,
+      config: {
+        mimeType: 'audio/mp3',
       }
-    ]
-  });
+    });
 
-  if (!response.text) {
-    throw new Error('Gemini no devolvió ninguna transcripción.');
+    console.log(`[AI Fallback] Uploaded to Gemini as ${uploadResult.name}. Generating content...`);
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Transcribe el siguiente audio con la mayor precisión posible en el idioma original en el que se habla. Devuelve ÚNICAMENTE el texto de la transcripción, sin ningún otro comentario, formato markdown o introducción.' },
+            {
+              fileData: {
+                fileUri: uploadResult.uri,
+                mimeType: uploadResult.mimeType
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    if (!response.text) {
+      throw new Error('Gemini no devolvió ninguna transcripción.');
+    }
+
+    console.log(`[AI Fallback] Transcription successful! Cleaning up...`);
+    
+    // Cleanup file from Gemini
+    if (uploadResult.name) {
+      try {
+        await ai.files.delete({ name: uploadResult.name });
+      } catch (cleanupErr) {
+        console.warn(`[AI Fallback] Could not delete file from Gemini:`, cleanupErr);
+      }
+    }
+
+    return response.text.trim();
+  } finally {
+    // Cleanup local file
+    try {
+      await fs.unlink(tmpFilePath);
+    } catch (e) {
+      // Ignore if file doesn't exist
+    }
   }
-
-  console.log(`[AI Fallback] Transcription successful!`);
-  return response.text.trim();
 }
 
 export async function POST(req: Request) {
   try {
-    const { videoUrl } = await req.json();
+    const { videoUrl, preferredLanguage = 'auto' } = await req.json();
 
     if (!videoUrl) {
       return NextResponse.json({ error: 'Video URL is required' }, { status: 400 });
@@ -132,6 +130,8 @@ export async function POST(req: Request) {
     if (!videoId) {
       return NextResponse.json({ error: 'Invalid Video URL' }, { status: 400 });
     }
+
+    let transcriptText = null;
 
     // Strategy 1: Custom fetch with CONSENT cookie
     try {
@@ -151,9 +151,15 @@ export async function POST(req: Request) {
           const captionTracks = captionsJson?.playerCaptionsTracklistRenderer?.captionTracks;
 
           if (captionTracks && captionTracks.length > 0) {
-            let track = captionTracks.find((t: any) => t.languageCode === 'es') || 
-                        captionTracks.find((t: any) => t.languageCode === 'en') || 
-                        captionTracks[0];
+            let track;
+            if (preferredLanguage !== 'auto') {
+              track = captionTracks.find((t: any) => t.languageCode === preferredLanguage);
+            }
+            if (!track) {
+              track = captionTracks.find((t: any) => t.languageCode === 'es') || 
+                      captionTracks.find((t: any) => t.languageCode === 'en') || 
+                      captionTracks[0];
+            }
 
             const transcriptResponse = await fetch(track.baseUrl);
             const transcriptXml = await transcriptResponse.text();
@@ -170,7 +176,7 @@ export async function POST(req: Request) {
               text += decoded + ' ';
             }
             if (text.trim()) {
-              return NextResponse.json({ text: text.trim() });
+              transcriptText = text.trim();
             }
           }
         }
@@ -178,6 +184,8 @@ export async function POST(req: Request) {
     } catch (e) {
       console.warn("Strategy 1 failed", e);
     }
+
+    if (transcriptText) return NextResponse.json({ text: transcriptText });
 
     // Strategy 2: Piped API (Multiple Public Instances)
     const pipedInstances = [
@@ -198,17 +206,27 @@ export async function POST(req: Request) {
           const pipedData = await pipedRes.json();
           
           if (pipedData.subtitles && pipedData.subtitles.length > 0) {
-            const sub = pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('spanish') || s.name.toLowerCase().includes('español')) || 
-                        pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('english')) || 
-                        pipedData.subtitles.find((s: any) => s.autoGenerated === false) ||
-                        pipedData.subtitles[0];
+            let sub;
+            if (preferredLanguage === 'es') {
+              sub = pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('spanish') || s.name.toLowerCase().includes('español'));
+            } else if (preferredLanguage === 'en') {
+              sub = pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('english'));
+            }
+            
+            if (!sub) {
+              sub = pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('spanish') || s.name.toLowerCase().includes('español')) || 
+                    pipedData.subtitles.find((s: any) => s.name.toLowerCase().includes('english')) || 
+                    pipedData.subtitles.find((s: any) => s.autoGenerated === false) ||
+                    pipedData.subtitles[0];
+            }
                         
             const subRes = await fetch(sub.url);
             const subText = await subRes.text();
             const parsedText = parseVtt(subText);
             
             if (parsedText) {
-              return NextResponse.json({ text: parsedText });
+              transcriptText = parsedText;
+              break;
             }
           }
         }
@@ -217,49 +235,26 @@ export async function POST(req: Request) {
       }
     }
 
-    // Strategy 3: Cobalt API (Alternative to Piped)
-    try {
-      const cobaltRes = await fetch('https://api.cobalt.tools/', {  // ✅ FIX 1: v2 endpoint
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: videoUrl,
-          downloadMode: 'audio',  // ✅ FIX 1: v2 payload
-          audioFormat: 'best'
-        }),
-        signal: AbortSignal.timeout(6000)
-      });
+    if (transcriptText) return NextResponse.json({ text: transcriptText });
 
-      if (cobaltRes.ok) {
-        console.log("Cobalt API reached successfully, but subtitle extraction is not supported directly via Cobalt.");
-      }
-    } catch (e) {
-      console.warn("Strategy 3 (Cobalt) failed:", e instanceof Error ? e.message : 'Unknown error');
+    // Strategy 3: Fallback to youtube-transcript library
+    try {
+      const transcript = await YoutubeTranscript.fetchTranscript(videoUrl, { lang: preferredLanguage !== 'auto' ? preferredLanguage : undefined });
+      transcriptText = transcript.map(t => t.text).join(' ');
+    } catch (e: any) {
+      console.warn("Strategy 3 (youtube-transcript) failed:", e.message);
     }
 
-    // Strategy 4: Fallback to youtube-transcript library
+    if (transcriptText) return NextResponse.json({ text: transcriptText });
+
+    // Strategy 4: AI Fallback (If all previous strategies failed)
+    console.log("All subtitle strategies failed. Attempting AI Fallback...");
     try {
-      const transcript = await YoutubeTranscript.fetchTranscript(videoUrl);
-      const text = transcript.map(t => t.text).join(' ');
-      return NextResponse.json({ text });
-    } catch (e: any) {
-      console.warn("Strategy 4 (youtube-transcript) failed:", e.message);
-      
-      if (e.message && e.message.includes('Transcript is disabled')) {
-        console.log("Transcript disabled natively. Attempting AI Fallback...");
-        try {
-          const aiText = await transcribeWithAI(videoUrl);
-          return NextResponse.json({ text: aiText, isAIGenerated: true });
-        } catch (aiError: any) {
-          console.error("AI Fallback failed:", aiError.message);
-          throw new Error(`Los subtítulos están desactivados y la IA falló: ${aiError.message}`);
-        }
-      }
-      
-      throw e;
+      const aiText = await transcribeWithAI(videoUrl);
+      return NextResponse.json({ text: aiText, isAIGenerated: true });
+    } catch (aiError: any) {
+      console.error("AI Fallback failed:", aiError.message);
+      throw new Error(`No se pudieron obtener los subtítulos y la IA falló: ${aiError.message}`);
     }
 
   } catch (error: any) {
