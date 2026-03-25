@@ -1,5 +1,5 @@
 {
-  "name": "YouTube Channel Transcript Scraper",
-  "description": "Scrape all videos from a YouTube channel and download their transcripts as a text file.",
+  "name": "YouTube Transcript Bulk Exporter",
+  "description": "A powerful tool to extract, process, and export transcripts from entire YouTube channels in bulk, with AI fallback for missing captions.",
   "requestFramePermissions": []
 }

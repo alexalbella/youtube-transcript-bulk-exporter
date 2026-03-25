@@ -1,0 +1,17 @@
+{
+  "name": "YouTube Transcript Bulk Exporter",
+  "short_name": "YT Exporter",
+  "description": "Extract, process, and export transcripts from entire YouTube channels in bulk.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#dc2626",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

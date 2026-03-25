@@ -1,0 +1,55 @@
+name: Bug Report
+description: Create a report to help us improve the exporter
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: When I try to export a channel with 500+ videos, it fails at video 150...
+    validations:
+      required: true
+  - type: input
+    id: channel_url
+    attributes:
+      label: Channel URL
+      description: What channel were you trying to scrape?
+      placeholder: https://www.youtube.com/@midudev
+    validations:
+      required: false
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this issue?
+      placeholder: |
+        1. Go to '...'
+        2. Enter URL '...'
+        3. Click on '...'
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, OS, browser, etc.
+      placeholder: |
+        - OS: macOS 14.2
+        - Browser: Chrome 120
+        - Node.js version: 20.10.0
+    validations:
+      required: true
