@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { YoutubeTranscript } from 'youtube-transcript';
+import { GoogleGenAI } from '@google/genai';
 
 // Helper to extract video ID
 function extractVideoId(url: string) {
@@ -23,6 +24,96 @@ function parseVtt(vtt: string) {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// AI Fallback function
+async function transcribeWithAI(videoUrl: string): Promise<string> {
+  console.log(`[AI Fallback] Starting AI transcription for ${videoUrl}`);
+  
+  // 1. Get audio URL from Cobalt
+  const cobaltRes = await fetch('https://api.cobalt.tools/api/json', {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Origin': 'https://cobalt.tools',
+      'Referer': 'https://cobalt.tools/'
+    },
+    body: JSON.stringify({
+      url: videoUrl,
+      isAudioOnly: true,
+      aFormat: 'opus'
+    })
+  });
+
+  if (!cobaltRes.ok) {
+    throw new Error('No se pudo obtener el audio del video para la IA.');
+  }
+
+  const cobaltData = await cobaltRes.json();
+  const audioUrl = cobaltData.url;
+
+  if (!audioUrl) {
+    throw new Error('La API de audio no devolvió una URL válida.');
+  }
+
+  console.log(`[AI Fallback] Downloading audio from ${audioUrl.substring(0, 50)}...`);
+
+  // 2. Fetch the audio file
+  const audioRes = await fetch(audioUrl);
+  if (!audioRes.ok) {
+    throw new Error('Falló la descarga del archivo de audio.');
+  }
+
+  // Check size (Gemini inline limit is ~20MB)
+  const contentLength = audioRes.headers.get('content-length');
+  const MAX_SIZE = 19 * 1024 * 1024; // 19MB to be safe
+  if (contentLength && parseInt(contentLength) > MAX_SIZE) {
+    throw new Error('El video es demasiado largo para la transcripción por IA (límite de ~40 minutos).');
+  }
+
+  const arrayBuffer = await audioRes.arrayBuffer();
+  
+  if (arrayBuffer.byteLength > MAX_SIZE) {
+    throw new Error('El video es demasiado largo para la transcripción por IA (límite de ~40 minutos).');
+  }
+
+  const base64Audio = Buffer.from(arrayBuffer).toString('base64');
+  console.log(`[AI Fallback] Audio downloaded, size: ${(arrayBuffer.byteLength / 1024 / 1024).toFixed(2)} MB. Sending to Gemini...`);
+
+  // 3. Send to Gemini
+  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('API Key de Gemini no configurada.');
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3-flash-preview',
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: 'Transcribe el siguiente audio con la mayor precisión posible en el idioma original en el que se habla. Devuelve ÚNICAMENTE el texto de la transcripción, sin ningún otro comentario, formato markdown o introducción.' },
+          {
+            inlineData: {
+              mimeType: 'audio/ogg',
+              data: base64Audio
+            }
+          }
+        ]
+      }
+    ]
+  });
+
+  if (!response.text) {
+    throw new Error('Gemini no devolvió ninguna transcripción.');
+  }
+
+  console.log(`[AI Fallback] Transcription successful!`);
+  return response.text.trim();
 }
 
 export async function POST(req: Request) {
@@ -159,9 +250,16 @@ export async function POST(req: Request) {
     } catch (e: any) {
       console.warn("Strategy 4 (youtube-transcript) failed:", e.message);
       
-      // If the error is about transcript being disabled, throw a specific error
+      // If the error is about transcript being disabled, try AI Fallback
       if (e.message && e.message.includes('Transcript is disabled')) {
-        throw new Error('Los subtítulos están desactivados para este video.');
+        console.log("Transcript disabled natively. Attempting AI Fallback...");
+        try {
+          const aiText = await transcribeWithAI(videoUrl);
+          return NextResponse.json({ text: aiText, isAIGenerated: true });
+        } catch (aiError: any) {
+          console.error("AI Fallback failed:", aiError.message);
+          throw new Error(`Los subtítulos están desactivados y la IA falló: ${aiError.message}`);
+        }
       }
       
       throw e; // Throw the last error if all strategies fail

@@ -106,10 +106,17 @@ export default function Home() {
             combinedText += `--- VIDEO ${i + 1} ---\n`;
             combinedText += `Título: ${video.title}\n`;
             combinedText += `URL: ${video.url}\n`;
+            if (transcriptData.isAIGenerated) {
+              combinedText += `[NOTA: Esta transcripción fue generada por IA (Gemini) porque los subtítulos nativos estaban desactivados]\n`;
+            }
             combinedText += `Transcripción:\n${transcriptData.text}\n\n`;
             combinedText += `--------------------------------------------------------\n\n`;
 
-            addLog(`✓ Transcripción obtenida para el video ${i + 1}`, 'success');
+            if (transcriptData.isAIGenerated) {
+              addLog(`✓ Transcripción generada por IA para el video ${i + 1} ✨`, 'success');
+            } else {
+              addLog(`✓ Transcripción obtenida para el video ${i + 1}`, 'success');
+            }
             success = true;
             
             // Add a random delay between 2 and 5 seconds to avoid rate limiting
