@@ -1,0 +1,5 @@
+{
+  "name": "YouTube Channel Transcript Scraper",
+  "description": "Scrape all videos from a YouTube channel and download their transcripts as a text file.",
+  "requestFramePermissions": []
+}
